@@ -1,33 +1,28 @@
 // api/server.js
-// Orquestrador completo para o fluxo de login e busca de dados da Sala do Futuro.
+// Versão final de diagnóstico para o fluxo da Sala do Futuro.
 
-// Função auxiliar para fazer chamadas fetch e tratar erros de forma robusta.
-async function safeFetch(url, options) {
-    const response = await fetch(url, options);
-
-    // Tenta obter o corpo da resposta.
-    let data;
-    const responseText = await response.text(); // Lê como texto primeiro para evitar erros.
+async function safeFetch(url, options, stepName) {
     try {
-        data = JSON.parse(responseText); // Tenta fazer o parse.
-    } catch (e) {
-        // Se o parse falhar, o corpo não era JSON.
-        data = { error: 'A resposta da API não era um JSON válido.', details: responseText.substring(0, 500) };
-    }
+        const response = await fetch(url, options);
+        const responseText = await response.text();
 
-    // Se a resposta não foi bem-sucedida (status não é 2xx), lança um erro.
-    if (!response.ok) {
-        const errorMessage = (data && data.error) ? `${data.error} - ${data.details || ''}` : `Erro na API de destino (Status: ${response.status})`;
-        throw new Error(errorMessage);
+        if (!response.ok) {
+            throw new Error(`Status ${response.status}. Resposta: ${responseText.substring(0, 300)}`);
+        }
+
+        try {
+            return JSON.parse(responseText);
+        } catch (e) {
+            throw new Error(`A resposta não era JSON. Resposta: ${responseText.substring(0, 300)}`);
+        }
+    } catch (error) {
+        // Re-lança o erro com o nome da etapa para diagnóstico.
+        throw new Error(`[Falha na Etapa: ${stepName}] - ${error.message}`);
     }
-    
-    return data;
 }
-
 
 export default async function handler(request, response) {
     if (request.method !== 'POST') {
-        response.setHeader('Allow', 'POST');
         return response.status(405).end('Method Not Allowed');
     }
 
@@ -37,14 +32,22 @@ export default async function handler(request, response) {
             return response.status(400).json({ error: 'RA e senha são obrigatórios.' });
         }
 
-        // Cabeçalhos base para simular um navegador legítimo.
+        // Cabeçalhos que simulam um navegador Android via Chrome.
         const baseHeaders = {
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
             'Origin': 'https://saladofuturo.educacao.sp.gov.br',
             'Referer': 'https://saladofuturo.educacao.sp.gov.br/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+            'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
         };
 
-        // --- ETAPA 1: Login na SED para obter o primeiro token ---
+        // --- ETAPA 1: Login na SED ---
         const sedLoginUrl = 'https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken';
         const sedLoginData = await safeFetch(sedLoginUrl, {
             method: 'POST',
@@ -54,15 +57,15 @@ export default async function handler(request, response) {
                 'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a',
             },
             body: JSON.stringify({ user: ra, senha: senha }),
-        });
+        }, "Login SED");
         
         const sedToken = sedLoginData.token;
-        if (!sedToken) throw new Error('Token da SED não encontrado na resposta do login inicial.');
+        if (!sedToken) throw new Error('[Análise da Etapa: Login SED] - Token da SED não encontrado na resposta.');
         
         const codigoAluno = sedLoginData.perfils?.[0]?.codigo;
-        if (!codigoAluno) throw new Error('Código do Aluno não encontrado na resposta do login inicial.');
+        if (!codigoAluno) throw new Error('[Análise da Etapa: Login SED] - Código do Aluno não encontrado na resposta.');
 
-        // --- ETAPA 2: Trocar o token da SED por um token da EDUSP ---
+        // --- ETAPA 2: Troca de Token para EDUSP ---
         const eduspTokenUrl = 'https://edusp-api.ip.tv/registration/edusp/token';
         const eduspTokenData = await safeFetch(eduspTokenUrl, {
             method: 'POST',
@@ -71,25 +74,24 @@ export default async function handler(request, response) {
                 'Content-Type': 'application/json',
                 'x-api-realm': 'edusp',
                 'x-api-platform': 'webclient',
+                'Sec-Fetch-Site': 'cross-site', // Este é diferente para esta chamada
             },
             body: JSON.stringify({ token: sedToken }),
-        });
+        }, "Troca de Token EDUSP");
 
         const eduspApiKey = eduspTokenData.token;
-        if (!eduspApiKey) throw new Error('Token (API Key) da EDUSP não encontrado na resposta da troca.');
+        if (!eduspApiKey) throw new Error('[Análise da Etapa: Troca de Token EDUSP] - API Key da EDUSP não encontrada.');
 
-        // --- ETAPA 3: Buscar dados de ambos os serviços em paralelo ---
+        // --- ETAPA 3: Busca de Dados (Turmas e Salas) ---
         const [turmasData, roomsData] = await Promise.all([
-            // Buscar Turmas da SED
             safeFetch(`https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, {
                 method: 'GET',
                 headers: {
                     ...baseHeaders,
                     'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab',
-                    'Authorization': `Bearer ${sedToken}`, // Adicionando o token por segurança
+                    'Authorization': `Bearer ${sedToken}`,
                 }
-            }),
-            // Buscar Salas/Cards da EDUSP
+            }, "Buscar Turmas"),
             safeFetch('https://edusp-api.ip.tv/room/user?list_all=true&with_cards=true', {
                 method: 'GET',
                 headers: {
@@ -97,26 +99,21 @@ export default async function handler(request, response) {
                     'x-api-key': eduspApiKey,
                     'x-api-realm': 'edusp',
                     'x-api-platform': 'webclient',
+                    'Sec-Fetch-Site': 'cross-site', // Diferente aqui também
                 }
-            })
+            }, "Buscar Salas Virtuais")
         ]);
 
-        // --- ETAPA 4: Agregar e retornar a resposta final ---
-        const finalResponse = {
+        // --- SUCESSO ---
+        response.status(200).json({
             success: true,
-            alunoInfo: {
-                nome: sedLoginData.nome,
-                email: sedLoginData.email,
-                codigoAluno: codigoAluno,
-            },
+            alunoInfo: { nome: sedLoginData.nome, email: sedLoginData.email, codigoAluno },
             turmas: turmasData,
             salasVirtuais: roomsData,
-        };
-        
-        response.status(200).json(finalResponse);
+        });
 
     } catch (error) {
-        console.error('Erro no fluxo de orquestração:', error);
+        console.error('Erro no fluxo de diagnóstico:', error);
         response.status(500).json({ success: false, error: 'Ocorreu um erro no servidor.', details: error.message });
     }
 }

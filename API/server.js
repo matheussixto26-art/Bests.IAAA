@@ -1,62 +1,122 @@
 // api/server.js
-// Esta é a Serverless Function que atua como nosso servidor de back-end.
+// Orquestrador completo para o fluxo de login e busca de dados da Sala do Futuro.
+
+// Função auxiliar para fazer chamadas fetch e tratar erros de forma robusta.
+async function safeFetch(url, options) {
+    const response = await fetch(url, options);
+
+    // Tenta obter o corpo da resposta.
+    let data;
+    const responseText = await response.text(); // Lê como texto primeiro para evitar erros.
+    try {
+        data = JSON.parse(responseText); // Tenta fazer o parse.
+    } catch (e) {
+        // Se o parse falhar, o corpo não era JSON.
+        data = { error: 'A resposta da API não era um JSON válido.', details: responseText.substring(0, 500) };
+    }
+
+    // Se a resposta não foi bem-sucedida (status não é 2xx), lança um erro.
+    if (!response.ok) {
+        const errorMessage = (data && data.error) ? `${data.error} - ${data.details || ''}` : `Erro na API de destino (Status: ${response.status})`;
+        throw new Error(errorMessage);
+    }
+    
+    return data;
+}
+
 
 export default async function handler(request, response) {
-    // Apenas requisições do tipo POST são permitidas para este endpoint.
     if (request.method !== 'POST') {
         response.setHeader('Allow', 'POST');
         return response.status(405).end('Method Not Allowed');
     }
 
     try {
-        // Pega os dados enviados pelo front-end (index.html).
-        const { targetUrl, method, headers, body } = request.body;
-
-        // Validação básica para garantir que os dados necessários foram enviados.
-        if (!targetUrl || !method) {
-            return response.status(400).json({ error: 'targetUrl e method são obrigatórios no corpo da requisição.' });
+        const { ra, senha } = request.body;
+        if (!ra || !senha) {
+            return response.status(400).json({ error: 'RA e senha são obrigatórios.' });
         }
 
-        const options = {
-            method: method,
-            headers: headers || {},
+        // Cabeçalhos base para simular um navegador legítimo.
+        const baseHeaders = {
+            'Origin': 'https://saladofuturo.educacao.sp.gov.br',
+            'Referer': 'https://saladofuturo.educacao.sp.gov.br/',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
         };
 
-        // Adiciona o corpo (payload) à requisição apenas se ele existir
-        // e o método não for GET.
-        if (body && method.toUpperCase() !== 'GET') {
-            options.body = JSON.stringify(body);
-        }
-
-        // Realiza a chamada de fetch para a API de destino (SED).
-        const apiResponse = await fetch(targetUrl, options);
-
-        // **INÍCIO DA CORREÇÃO DEFINITIVA**
-        // A abordagem mais segura: tentar fazer o parse como JSON.
-        // Se falhar, capturar o erro e tratar a resposta como texto.
-        let data;
-        try {
-            // Clona a resposta para que possamos lê-la duas vezes se necessário (uma para .json(), outra para .text()).
-            const clonedResponse = apiResponse.clone();
-            data = await clonedResponse.json();
-        } catch (jsonError) {
-            // Se o .json() falhou, significa que o corpo não é um JSON válido.
-            const responseText = await apiResponse.text();
-            // Retorna um objeto de erro estruturado para o front-end.
-            return response.status(apiResponse.status).json({
-                error: "A resposta da API de destino não pôde ser processada como JSON.",
-                details: `Erro de parse: ${jsonError.message}. Resposta recebida: ${responseText.substring(0, 500)}`
-            });
-        }
-        // **FIM DA CORREÇÃO DEFINITIVA**
+        // --- ETAPA 1: Login na SED para obter o primeiro token ---
+        const sedLoginUrl = 'https://sedintegracoes.educacao.sp.gov.br/credenciais/api/LoginCompletoToken';
+        const sedLoginData = await safeFetch(sedLoginUrl, {
+            method: 'POST',
+            headers: {
+                ...baseHeaders,
+                'Content-Type': 'application/json',
+                'Ocp-Apim-Subscription-Key': '2b03c1db3884488795f79c37c069381a',
+            },
+            body: JSON.stringify({ user: ra, senha: senha }),
+        });
         
-        // Se o try/catch passou, 'data' contém o JSON válido.
-        // Retorna a resposta da API da SED (status e dados) de volta para o front-end.
-        response.status(apiResponse.status).json(data);
+        const sedToken = sedLoginData.token;
+        if (!sedToken) throw new Error('Token da SED não encontrado na resposta do login inicial.');
+        
+        const codigoAluno = sedLoginData.perfils?.[0]?.codigo;
+        if (!codigoAluno) throw new Error('Código do Aluno não encontrado na resposta do login inicial.');
+
+        // --- ETAPA 2: Trocar o token da SED por um token da EDUSP ---
+        const eduspTokenUrl = 'https://edusp-api.ip.tv/registration/edusp/token';
+        const eduspTokenData = await safeFetch(eduspTokenUrl, {
+            method: 'POST',
+            headers: {
+                ...baseHeaders,
+                'Content-Type': 'application/json',
+                'x-api-realm': 'edusp',
+                'x-api-platform': 'webclient',
+            },
+            body: JSON.stringify({ token: sedToken }),
+        });
+
+        const eduspApiKey = eduspTokenData.token;
+        if (!eduspApiKey) throw new Error('Token (API Key) da EDUSP não encontrado na resposta da troca.');
+
+        // --- ETAPA 3: Buscar dados de ambos os serviços em paralelo ---
+        const [turmasData, roomsData] = await Promise.all([
+            // Buscar Turmas da SED
+            safeFetch(`https://sedintegracoes.educacao.sp.gov.br/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, {
+                method: 'GET',
+                headers: {
+                    ...baseHeaders,
+                    'Ocp-Apim-Subscription-Key': '5936fddda3484fe1aa4436df1bd76dab',
+                    'Authorization': `Bearer ${sedToken}`, // Adicionando o token por segurança
+                }
+            }),
+            // Buscar Salas/Cards da EDUSP
+            safeFetch('https://edusp-api.ip.tv/room/user?list_all=true&with_cards=true', {
+                method: 'GET',
+                headers: {
+                    ...baseHeaders,
+                    'x-api-key': eduspApiKey,
+                    'x-api-realm': 'edusp',
+                    'x-api-platform': 'webclient',
+                }
+            })
+        ]);
+
+        // --- ETAPA 4: Agregar e retornar a resposta final ---
+        const finalResponse = {
+            success: true,
+            alunoInfo: {
+                nome: sedLoginData.nome,
+                email: sedLoginData.email,
+                codigoAluno: codigoAluno,
+            },
+            turmas: turmasData,
+            salasVirtuais: roomsData,
+        };
+        
+        response.status(200).json(finalResponse);
 
     } catch (error) {
-        // Em caso de erro na nossa função (ex: falha de rede), loga e retorna um erro 500.
-        console.error('Erro no servidor proxy (server.js):', error);
-        response.status(500).json({ error: 'Ocorreu um erro interno no servidor.', details: error.message });
+        console.error('Erro no fluxo de orquestração:', error);
+        response.status(500).json({ success: false, error: 'Ocorreu um erro no servidor.', details: error.message });
     }
 }

@@ -31,31 +31,31 @@ export default async function handler(request, response) {
         // Realiza a chamada de fetch para a API de destino (SED).
         const apiResponse = await fetch(targetUrl, options);
 
-        // **INÍCIO DA CORREÇÃO**
-        // Verifica o Content-Type da resposta antes de tentar o parse.
-        const contentType = apiResponse.headers.get("content-type");
+        // **INÍCIO DA CORREÇÃO DEFINITIVA**
+        // A abordagem mais segura: tentar fazer o parse como JSON.
+        // Se falhar, capturar o erro e tratar a resposta como texto.
         let data;
-
-        if (contentType && contentType.includes("application/json")) {
-            // Se for JSON, faz o parse.
-            data = await apiResponse.json();
-        } else {
-            // Se não for JSON (ex: HTML de erro), lê como texto.
+        try {
+            // Clona a resposta para que possamos lê-la duas vezes se necessário (uma para .json(), outra para .text()).
+            const clonedResponse = apiResponse.clone();
+            data = await clonedResponse.json();
+        } catch (jsonError) {
+            // Se o .json() falhou, significa que o corpo não é um JSON válido.
             const responseText = await apiResponse.text();
             // Retorna um objeto de erro estruturado para o front-end.
-            // Usamos o status original da resposta da API.
             return response.status(apiResponse.status).json({
-                error: "A resposta da API de destino não foi JSON.",
-                details: responseText.substring(0, 500) // Limita o tamanho para não sobrecarregar
+                error: "A resposta da API de destino não pôde ser processada como JSON.",
+                details: `Erro de parse: ${jsonError.message}. Resposta recebida: ${responseText.substring(0, 500)}`
             });
         }
-        // **FIM DA CORREÇÃO**
+        // **FIM DA CORREÇÃO DEFINITIVA**
         
+        // Se o try/catch passou, 'data' contém o JSON válido.
         // Retorna a resposta da API da SED (status e dados) de volta para o front-end.
         response.status(apiResponse.status).json(data);
 
     } catch (error) {
-        // Em caso de erro na nossa função, loga no console da Vercel e retorna um erro 500.
+        // Em caso de erro na nossa função (ex: falha de rede), loga e retorna um erro 500.
         console.error('Erro no servidor proxy (server.js):', error);
         response.status(500).json({ error: 'Ocorreu um erro interno no servidor.', details: error.message });
     }

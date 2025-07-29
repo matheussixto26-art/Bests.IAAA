@@ -1,0 +1,11 @@
+{
+  "name": "automatizador-sed-server",
+  "version": "1.0.0",
+  "description": "Proxy para a API da SED usando um único arquivo server.js na Vercel.",
+  "main": "api/server.js",
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "author": "",
+  "license": "ISC"
+}

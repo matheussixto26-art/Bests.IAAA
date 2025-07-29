@@ -99,8 +99,13 @@
                     body: JSON.stringify(loginPayload)
                 }).then(res => res.json());
 
-                if (loginResponse.error || !loginResponse.token) {
-                   throw new Error(loginResponse.error || 'Credenciais inválidas ou token não retornado.');
+                // **CORREÇÃO NO TRATAMENTO DE ERRO**
+                if (loginResponse.error) {
+                   // Agora podemos mostrar o erro detalhado vindo do backend
+                   throw new Error(`${loginResponse.error} Detalhes: ${loginResponse.details || 'N/A'}`);
+                }
+                if (!loginResponse.token) {
+                   throw new Error('Credenciais podem ser válidas, mas o token não foi retornado pela API.');
                 }
                 
                 document.querySelector('#aluno-info pre').textContent = JSON.stringify(loginResponse, null, 2);
@@ -131,7 +136,7 @@
                 }).then(res => res.json());
 
                 if (turmasResponse.error) {
-                    throw new Error(turmasResponse.error);
+                    throw new Error(`${turmasResponse.error} Detalhes: ${turmasResponse.details || 'N/A'}`);
                 }
 
                 displayTurmas(turmasResponse);
@@ -183,4 +188,5 @@
 
     </script>
 </body>
-</html>
+    </html>
+    

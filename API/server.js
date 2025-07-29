@@ -31,16 +31,25 @@ export default async function handler(request, response) {
         // Realiza a chamada de fetch para a API de destino (SED).
         const apiResponse = await fetch(targetUrl, options);
 
-        // Tenta extrair a resposta como JSON.
+        // **INÍCIO DA CORREÇÃO**
+        // Verifica o Content-Type da resposta antes de tentar o parse.
+        const contentType = apiResponse.headers.get("content-type");
         let data;
-        try {
+
+        if (contentType && contentType.includes("application/json")) {
+            // Se for JSON, faz o parse.
             data = await apiResponse.json();
-        } catch (e) {
-            // Se a resposta não for um JSON válido (ex: erro 500 com texto),
-            // retorna o texto puro.
-            data = { error: 'A resposta da API de destino não era um JSON válido.', responseText: await apiResponse.text() };
-            return response.status(apiResponse.status).json(data);
+        } else {
+            // Se não for JSON (ex: HTML de erro), lê como texto.
+            const responseText = await apiResponse.text();
+            // Retorna um objeto de erro estruturado para o front-end.
+            // Usamos o status original da resposta da API.
+            return response.status(apiResponse.status).json({
+                error: "A resposta da API de destino não foi JSON.",
+                details: responseText.substring(0, 500) // Limita o tamanho para não sobrecarregar
+            });
         }
+        // **FIM DA CORREÇÃO**
         
         // Retorna a resposta da API da SED (status e dados) de volta para o front-end.
         response.status(apiResponse.status).json(data);
